@@ -20,6 +20,16 @@ const sessions = new Map<string, TaskState>();
 let activeRenderSession = "";
 
 /**
+ * Widget-surface ownership, shared by every extension closure in the process.
+ * Pi calls the extension factory once per session runner, so each session has
+ * its own closure; only this module is shared. A surface is the host widget
+ * API a session's ui writes to (see `index.ts`). The first UI session bound to a
+ * surface owns it until shutdown, so a child that relays the parent's UI cannot
+ * take over or remove the parent's widget.
+ */
+const surfaceOwners = new Map<unknown, string>();
+
+/**
  * Session-id extractor. Structural ctx type (no Pi-runtime import) —
  * mirrors `replay.ts`'s ctx shape so `state/` stays Pi-import-free. Returns
  * `… ?? ""` so an unknown/empty session resolves to "" rather than undefined
@@ -114,12 +124,34 @@ export function clearActiveRenderSession(): void {
 }
 
 /**
+ * Claim a widget surface for a session. Returns false when another session owns
+ * it. On success the session drops any surface it held before (a re-bind after
+ * `/reload` brings a new ui) and owns only this one.
+ */
+export function claimWidgetSurface(surface: unknown, sessionId: string): boolean {
+	const owner = surfaceOwners.get(surface);
+	if (owner !== undefined && owner !== sessionId) return false;
+	releaseWidgetSurfaces(sessionId);
+	surfaceOwners.set(surface, sessionId);
+	return true;
+}
+
+/** Release every surface a session owns (its `session_shutdown`). */
+export function releaseWidgetSurfaces(sessionId: string): void {
+	for (const [surface, owner] of surfaceOwners) {
+		if (owner === sessionId) surfaceOwners.delete(surface);
+	}
+}
+
+/**
  * Test-setup reset. Wired into the global `test/setup.ts` `beforeEach` via
  * the existing `__resetState` import path. Signature unchanged ⇒ no
  * `test/setup.ts` edit needed. Clears BOTH the session Map and the render
- * pointer so filesystem/detect resets start from a clean state.
+ * pointer (and the surface owners) so filesystem/detect resets start from a
+ * clean state.
  */
 export function __resetState(): void {
 	sessions.clear();
+	surfaceOwners.clear();
 	activeRenderSession = "";
 }

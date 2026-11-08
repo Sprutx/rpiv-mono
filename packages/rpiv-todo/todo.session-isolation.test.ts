@@ -1,4 +1,4 @@
-import { createMockCtx, createMockPi } from "@juicesharp/rpiv-test-utils";
+import { buildSessionEntries, createMockCtx, createMockPi, makeTodoToolResult } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, type vi } from "vitest";
 import registerTodo from "./index.ts";
 import { EMPTY_STATE } from "./state/state.ts";
@@ -6,8 +6,8 @@ import { getActiveRenderSession, getRenderState, getState } from "./state/store.
 import { __resetState } from "./todo.ts";
 
 // Capture the extension's registered handlers + tool + command. Each registerTodo()
-// call builds a fresh closure (fresh module-level `todoOverlay`), so isolation
-// between tests is automatic given __resetState() clears the store.
+// call builds a fresh closure (fresh overlay slots), so isolation between tests
+// is automatic given __resetState() clears the store.
 function setup() {
 	__resetState();
 	const { pi, captured } = createMockPi();
@@ -210,14 +210,16 @@ describe("rpiv-todo — foreground overlay policy (Slice 2)", () => {
 		);
 		await toolEnd?.({ toolName: "todo", isError: false });
 
-		// Child session_start — distinct sid, hasUI true. Gate skips it.
+		// Child session_start — distinct sid, hasUI true, its own ui. It binds its
+		// own slot but has no tasks, so nothing is drawn on its ui.
 		await start?.({}, childCtx);
 
 		// Foreground unchanged; overlay still renders the parent slot.
 		expect(getActiveRenderSession()).toBe(PARENT);
 		expect(getRenderState().tasks.map((t) => t.subject)).toEqual(["parent task"]);
-		// Child ui was never bound — setUICtx/update skipped by the sid gate.
+		// No child tasks → no widget on the child ui, and the parent's stays.
 		expect(widgetSpy(childCtx)).not.toHaveBeenCalled();
+		expect(widgetSpy(parentCtx)).not.toHaveBeenCalledWith(WIDGET_KEY, undefined);
 	});
 
 	it("a child todo call writes the child's slot; the overlay still shows the parent's todos", async () => {
@@ -235,7 +237,7 @@ describe("rpiv-todo — foreground overlay policy (Slice 2)", () => {
 		);
 		await toolEnd?.({ toolName: "todo", isError: false });
 
-		// Child starts (skipped by the gate) and runs its own todo.
+		// Child starts with its own ui and runs its own todo.
 		await start?.({}, childCtx);
 		await tool?.execute?.(
 			"tc",
@@ -246,9 +248,11 @@ describe("rpiv-todo — foreground overlay policy (Slice 2)", () => {
 		);
 		await toolEnd?.({ toolName: "todo", isError: false });
 
-		// Child slot holds the child task; the overlay (foreground = parent) shows parent's.
+		// Child slot holds the child task; the render pointer (renderCall) stays on
+		// the parent. A child with its own ui draws its own widget.
 		expect(getState(CHILD).tasks.map((t) => t.subject)).toEqual(["child task"]);
 		expect(getRenderState().tasks.map((t) => t.subject)).toEqual(["parent task"]);
+		expect(widgetSpy(childCtx)).toHaveBeenCalledWith(WIDGET_KEY, expect.any(Function), { placement: "aboveEditor" });
 	});
 
 	it("a child session_shutdown does not dispose the foreground overlay", async () => {
@@ -336,5 +340,193 @@ describe("rpiv-todo — foreground overlay policy (Slice 2)", () => {
 		expect(getActiveRenderSession()).toBe("");
 		expect(widgetSpy(headlessCtx)).not.toHaveBeenCalled();
 		expect(widgetSpy(childHeadlessCtx)).not.toHaveBeenCalled();
+	});
+});
+
+describe("rpiv-todo — one overlay per session in a multi-session host", () => {
+	const WIDGET_KEY = "rpiv-todos";
+	const identityTheme = { fg: (_c: string, s: string) => s } as never;
+	type Ctx = ReturnType<typeof createMockCtx>;
+
+	function widgetSpy(ctx: Ctx) {
+		return ctx.ui.setWidget as unknown as ReturnType<typeof vi.fn>;
+	}
+
+	// Render the widget a session registered, the way the host would.
+	function renderWidget(ctx: Ctx): string {
+		const call = widgetSpy(ctx).mock.calls.find(([key, content]) => key === WIDGET_KEY && content !== undefined);
+		if (!call) throw new Error("no widget registered");
+		const factory = call[1] as (
+			tui: { requestRender: () => void },
+			theme: never,
+		) => { render: (width: number) => string[] };
+		return factory({ requestRender: () => {} }, identityTheme)
+			.render(200)
+			.join("\n");
+	}
+
+	// Pi calls the extension factory once per session runner: every session gets
+	// its own closure, and only the module state (the store) is shared.
+	function runner() {
+		const { pi, captured } = createMockPi();
+		registerTodo(pi);
+		const start = captured.events.get("session_start")?.[0] as (e: unknown, ctx: unknown) => Promise<void>;
+		const shutdown = captured.events.get("session_shutdown")?.[0] as (e: unknown, ctx: unknown) => Promise<void>;
+		const toolEnd = captured.events.get("tool_execution_end")?.[0] as (
+			event: { toolName: string; isError: boolean },
+			ctx?: unknown,
+		) => Promise<void>;
+		const tool = captured.tools.get("todo");
+		if (!tool) throw new Error("todo tool not registered");
+		const create = async (ctx: Ctx, subject: string) => {
+			await tool.execute?.(
+				"tc",
+				{ action: "create", subject } as never,
+				undefined as never,
+				undefined as never,
+				ctx as never,
+			);
+			await toolEnd({ toolName: "todo", isError: false }, ctx);
+		};
+		return { start, shutdown, create };
+	}
+
+	beforeEach(() => __resetState());
+
+	it("a second session with its own ui renders its own tasks, not the first session's", async () => {
+		const runA = runner();
+		const runB = runner();
+		const first = createMockCtx({ hasUI: true, sessionId: "first" });
+		const second = createMockCtx({ hasUI: true, sessionId: "second" });
+
+		await runA.start({}, first);
+		await runB.start({}, second);
+		await runA.create(first, "first task");
+		await runB.create(second, "second task");
+
+		expect(widgetSpy(first)).toHaveBeenCalledTimes(1);
+		expect(widgetSpy(second)).toHaveBeenCalledTimes(1);
+		expect(renderWidget(first)).toContain("first task");
+		expect(renderWidget(first)).not.toContain("second task");
+		expect(renderWidget(second)).toContain("second task");
+		expect(renderWidget(second)).not.toContain("first task");
+	});
+
+	it("a todo call in one session does not touch another session's widget", async () => {
+		const runA = runner();
+		const runB = runner();
+		const first = createMockCtx({ hasUI: true, sessionId: "first" });
+		const second = createMockCtx({ hasUI: true, sessionId: "second" });
+
+		await runA.start({}, first);
+		await runB.start({}, second);
+		await runB.create(second, "second task");
+
+		expect(widgetSpy(first)).not.toHaveBeenCalled();
+		expect(widgetSpy(second)).toHaveBeenCalledTimes(1);
+	});
+
+	it("shutting down the first session keeps the second session's widget", async () => {
+		const runA = runner();
+		const runB = runner();
+		const first = createMockCtx({ hasUI: true, sessionId: "first" });
+		const second = createMockCtx({ hasUI: true, sessionId: "second" });
+
+		await runA.start({}, first);
+		await runB.start({}, second);
+		await runA.create(first, "first task");
+		await runB.create(second, "second task");
+
+		await runA.shutdown({}, first);
+
+		expect(widgetSpy(first)).toHaveBeenCalledWith(WIDGET_KEY, undefined);
+		expect(widgetSpy(second)).not.toHaveBeenCalledWith(WIDGET_KEY, undefined);
+		expect(renderWidget(second)).toContain("second task");
+	});
+
+	it("a session resumed with persisted tasks after another session shows its widget on start", async () => {
+		const runA = runner();
+		const runB = runner();
+		const first = createMockCtx({ hasUI: true, sessionId: "first" });
+		await runA.start({}, first);
+		await runA.create(first, "first task");
+
+		const resumed = createMockCtx({
+			hasUI: true,
+			sessionId: "resumed",
+			branch: buildSessionEntries([
+				makeTodoToolResult({
+					action: "create",
+					params: { subject: "resumed task" },
+					tasks: [{ id: 1, subject: "resumed task", status: "pending" }],
+					nextId: 2,
+				}),
+			]),
+		});
+		await runB.start({}, resumed);
+
+		expect(renderWidget(resumed)).toContain("resumed task");
+		expect(renderWidget(first)).not.toContain("resumed task");
+	});
+
+	it("one closure that sees two sessions still gives each its own widget", async () => {
+		const run = runner();
+		const first = createMockCtx({ hasUI: true, sessionId: "first" });
+		const second = createMockCtx({ hasUI: true, sessionId: "second" });
+
+		await run.start({}, first);
+		await run.start({}, second);
+		await run.create(first, "first task");
+		await run.create(second, "second task");
+
+		expect(renderWidget(first)).toContain("first task");
+		expect(renderWidget(first)).not.toContain("second task");
+		expect(renderWidget(second)).toContain("second task");
+	});
+
+	it("a child that relays the parent's ui surface never takes over the parent's widget", async () => {
+		const parentRun = runner();
+		const childRun = runner();
+		const parent = createMockCtx({ hasUI: true, sessionId: "parent" });
+		// Pi spreads the host ui per runner: a distinct object, the same setWidget.
+		const child = createMockCtx({ hasUI: true, sessionId: "child" });
+		(child as { ui: unknown }).ui = { ...parent.ui };
+
+		await parentRun.start({}, parent);
+		await parentRun.create(parent, "parent task");
+		await childRun.start({}, child);
+		await childRun.create(child, "child task");
+
+		// Only the parent's single registration reached the shared surface.
+		expect(widgetSpy(parent)).toHaveBeenCalledTimes(1);
+		expect(renderWidget(parent)).toContain("parent task");
+		expect(renderWidget(parent)).not.toContain("child task");
+
+		await childRun.shutdown({}, child);
+		expect(widgetSpy(parent)).not.toHaveBeenCalledWith(WIDGET_KEY, undefined);
+	});
+
+	it("after the parent shuts down, the next session on the same surface takes it over", async () => {
+		const oldRun = runner();
+		const newRun = runner();
+		const old = createMockCtx({ hasUI: true, sessionId: "old" });
+		const next = createMockCtx({ hasUI: true, sessionId: "next" });
+		(next as { ui: unknown }).ui = { ...old.ui };
+
+		await oldRun.start({}, old);
+		await oldRun.create(old, "old task");
+		await oldRun.shutdown({}, old);
+		await newRun.start({}, next);
+		await newRun.create(next, "next task");
+
+		const last = widgetSpy(old).mock.calls.at(-1);
+		expect(last?.[0]).toBe(WIDGET_KEY);
+		expect(typeof last?.[1]).toBe("function");
+		const factory = last?.[1] as (t: { requestRender: () => void }, th: never) => { render: (w: number) => string[] };
+		expect(
+			factory({ requestRender: () => {} }, identityTheme)
+				.render(200)
+				.join("\n"),
+		).toContain("next task");
 	});
 });

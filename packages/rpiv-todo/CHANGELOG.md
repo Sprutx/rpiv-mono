@@ -5,6 +5,12 @@ All notable changes to `@juicesharp/rpiv-todo` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Every session in a multi-session host now shows its own todo overlay.** A host that runs several sessions in one process (pi-web) shares this module's state between them. The overlay was gated on one shared render pointer, held by the first UI session, so later sessions created tasks but never showed the widget. Each UI session now owns its overlay, bound to its own `ui` and rendering its own task slot. A child that relays the parent's widget surface still cannot take over or remove the parent's widget: surface ownership is kept in the shared store.
+
 ## [2.15.0] - 2026-10-24
 
 ### Fixed

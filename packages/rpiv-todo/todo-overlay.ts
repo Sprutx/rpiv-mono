@@ -7,7 +7,10 @@
  * getMaxWidgetLines(); plus a trailing spacer row so the widget renders up
  * to 13 lines), Pi tool-output expansion awareness, auto-hide when empty.
  *
- * Reads live state via `getRenderState()` (the ctx-less foreground slot) at render
+ * Reads live state through the injected `readState` at render time. `index.ts`
+ * passes a reader bound to the owning session's slot, so each session's overlay
+ * renders its own tasks; the default `getRenderState()` (the ctx-less foreground
+ * slot) keeps direct constructions working. Read at render
  * time — NEVER `replayFromBranch` from `tool_execution_end` (branch is stale;
  * `message_end` runs after).
  */
@@ -17,6 +20,7 @@ import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { COLLAPSE_KEY_OFF, getMaxWidgetLines, resolveCollapseKey } from "./config.ts";
 import { formatStatusLabel, t } from "./state/i18n-bridge.ts";
 import { selectHasActive, selectOverlayLayout, selectShowTaskIds, selectTodoCounts } from "./state/selectors.ts";
+import type { TaskState } from "./state/state.ts";
 import { getRenderState } from "./state/store.ts";
 import { formatOverlayTaskLine } from "./view/format.ts";
 
@@ -36,6 +40,8 @@ export class TodoOverlay {
 	private hiddenCompletedTaskIds = new Set<number>();
 	private lastNextId: number | undefined;
 	private collapsed = false;
+
+	constructor(private readonly readState: () => TaskState = getRenderState) {}
 
 	setUICtx(ctx: ExtensionUIContext): void {
 		// Identity-compare so repeat session_start handlers are idempotent;
@@ -110,7 +116,7 @@ export class TodoOverlay {
 	}
 
 	private getSnapshot() {
-		const state = getRenderState();
+		const state = this.readState();
 		if (this.lastNextId !== undefined && state.nextId < this.lastNextId) {
 			this.resetCompletedDisplayState();
 		}
