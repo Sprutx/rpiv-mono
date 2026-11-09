@@ -248,6 +248,91 @@ describe("TodoOverlay — lifecycle", () => {
 		expect(() => overlay.hideCompletedTasksFromPreviousTurn()).not.toThrow();
 	});
 
+	it("hiding the last completed rows on the next turn unregisters the widget", async () => {
+		const { captured } = registerTool();
+		await seed(captured, [
+			{ action: "create", subject: "done" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		const overlay = new TodoOverlay();
+		const ui = makeCtx();
+		overlay.setUICtx(ui);
+		overlay.update();
+		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
+		const factory = setWidget.mock.calls[0][1] as (
+			tui: { requestRender: () => void },
+			theme: typeof identityTheme,
+		) => { render: (w: number) => string[]; invalidate: () => void };
+		const widget = factory({ requestRender: vi.fn() }, identityTheme);
+		widget.render(200); // the completed row is shown once, then queued for hide
+
+		overlay.hideCompletedTasksFromPreviousTurn();
+
+		// A host that lists registered widgets (pi-web) must not keep an empty label.
+		expect(setWidget).toHaveBeenLastCalledWith(WIDGET_KEY, undefined);
+		expect(overlay.isRegistered()).toBe(false);
+	});
+
+	it("after the empty unregister, a new task registers the widget again without the hidden rows", async () => {
+		const { captured } = registerTool();
+		const tool = await seed(captured, [
+			{ action: "create", subject: "done" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		const overlay = new TodoOverlay();
+		const ui = makeCtx();
+		overlay.setUICtx(ui);
+		overlay.update();
+		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
+		type Factory = (
+			tui: { requestRender: () => void },
+			theme: typeof identityTheme,
+		) => { render: (w: number) => string[]; invalidate: () => void };
+		(setWidget.mock.calls[0][1] as Factory)({ requestRender: vi.fn() }, identityTheme).render(200);
+		overlay.hideCompletedTasksFromPreviousTurn();
+
+		await tool.execute?.(
+			"tc",
+			{ action: "create", subject: "next" } as never,
+			undefined as never,
+			undefined as never,
+			createMockCtx() as never,
+		);
+		overlay.update();
+
+		expect(setWidget).toHaveBeenCalledTimes(3);
+		const again = setWidget.mock.calls[2][1] as Factory;
+		const out = again({ requestRender: vi.fn() }, identityTheme).render(200).join("\n");
+		expect(out).toContain("next");
+		expect(out).not.toContain("done");
+	});
+
+	it("hiding some completed rows keeps the widget while other tasks remain", async () => {
+		const { captured } = registerTool();
+		await seed(captured, [
+			{ action: "create", subject: "done" },
+			{ action: "update", id: 1, status: "completed" },
+			{ action: "create", subject: "open" },
+		]);
+		const overlay = new TodoOverlay();
+		const ui = makeCtx();
+		overlay.setUICtx(ui);
+		overlay.update();
+		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
+		const factory = setWidget.mock.calls[0][1] as (
+			tui: { requestRender: () => void },
+			theme: typeof identityTheme,
+		) => { render: (w: number) => string[]; invalidate: () => void };
+		const tui = { requestRender: vi.fn() };
+		factory(tui, identityTheme).render(200);
+
+		overlay.hideCompletedTasksFromPreviousTurn();
+
+		expect(setWidget).toHaveBeenCalledTimes(1);
+		expect(overlay.isRegistered()).toBe(true);
+		expect(tui.requestRender).toHaveBeenCalledTimes(1);
+	});
+
 	it("all-deleted todos count as empty (no widget)", async () => {
 		const { captured } = registerTool();
 		const tool = await seed(captured, [{ action: "create", subject: "a" }]);

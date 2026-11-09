@@ -100,6 +100,13 @@ export class TodoOverlay {
 			this.hiddenCompletedTaskIds.add(taskId);
 		}
 		this.completedTaskIdsPendingHide.clear();
+		// Hiding the last visible rows must remove the widget, not leave it rendering
+		// nothing: a host that lists registered widgets (pi-web) would otherwise keep
+		// an empty, non-expandable label. update() unregisters on an empty list.
+		if (this.selectOverlayTasks(this.getSnapshot()).length === 0) {
+			this.update();
+			return;
+		}
 		this.tui?.requestRender();
 	}
 

@@ -9,6 +9,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The overlay is removed once the next turn hides its last rows.** When every task was completed, the next agent turn hid the completed rows but left the widget registered and rendering nothing. The terminal shows nothing for an empty widget, but a host that lists registered widgets (pi-web) kept an empty `rpiv-todos` label that could not be expanded. The overlay now unregisters when hiding leaves no visible task, and registers again on the next new task.
 - **Every session in a multi-session host now shows its own todo overlay.** A host that runs several sessions in one process (pi-web) shares this module's state between them. The overlay was gated on one shared render pointer, held by the first UI session, so later sessions created tasks but never showed the widget. Each UI session now owns its overlay, bound to its own `ui` and rendering its own task slot. A child that relays the parent's widget surface still cannot take over or remove the parent's widget: surface ownership is kept in the shared store.
 
 ## [2.15.0] - 2026-10-24
